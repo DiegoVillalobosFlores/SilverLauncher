@@ -3,10 +3,24 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "dev": "bun --hot ./index.ts",
+    "start": "bun ./index.ts"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7"
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "bun-plugin-tailwind": "^0.1.2",
+    "node-hid": "^3.4.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3",
+    "tailwindcss": "^4.3.3"
   }
 }
