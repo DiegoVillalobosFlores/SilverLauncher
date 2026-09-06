@@ -8,6 +8,15 @@ import {
   useParams,
 } from "react-router-dom";
 import { useDeviceState, type UiDevice, type DeviceStateResult } from "./use-device-state";
+import { useLighting } from "./use-lighting";
+import {
+  fromHex,
+  showsZoneSelector,
+  toHex,
+  zoneState,
+  type LightingDescriptor,
+  type LightingZoneState,
+} from "./lighting-model";
 
 const supportedModels = ["Keychron M6", "ASUS ROG Harpe II ACE", "Lofree Hyzen"];
 const featureLabels: Record<string, string> = {
@@ -367,14 +376,139 @@ function DeviceDetail({ devices }: { devices: UiDevice[] }) {
         <h1 className="mt-3 text-4xl font-semibold tracking-[-0.04em] text-white">{device.displayName}</h1>
         <p className="mt-3 text-[#9aa69d]">{device.vendor} <span className="mx-1 text-[#46534b]">/</span> {device.kind}</p>
       </div>
+      {device.capabilities.includes("lighting") && device.lighting && (
+        <LightingSection device={device} descriptor={device.lighting} />
+      )}
       <div className="state-panel text-left">
         <p className="eyebrow">Configuration workspace</p>
-        <h2 className="mt-3 text-2xl font-semibold text-white">The controls are coming next.</h2>
+        <h2 className="mt-3 text-2xl font-semibold text-white">More controls are coming next.</h2>
         <p className="mt-3 max-w-xl text-sm leading-6 text-[#8e9991]">This route is ready for device-specific settings. For now, the registry is the source of truth for what this device declares.</p>
         <div className="mt-6 flex flex-wrap gap-2">
           {device.capabilities.map((capability) => <span key={capability} className="capability-tag">{featureLabels[capability] ?? capability}</span>)}
         </div>
       </div>
+    </section>
+  );
+}
+
+function LightingSection({ device, descriptor }: { device: UiDevice; descriptor: LightingDescriptor }) {
+  const connected = device.connection === "connected" && device.access === "granted" && device.configurable;
+  const lighting = useLighting(device.id, connected);
+  const { model } = lighting;
+  const selectedZone = model.selectedZone ?? descriptor.zones[0]?.id ?? 0;
+  const current = zoneState(model, selectedZone);
+  const editable = model.editable && connected && current !== null;
+
+  const change = (patch: Partial<LightingZoneState>) => {
+    if (!current) return;
+    lighting.preview(selectedZone, { ...current, ...patch });
+  };
+
+  return (
+    <section className="state-panel text-left" aria-labelledby="lighting-heading">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="eyebrow">Lighting</p>
+          <h2 id="lighting-heading" className="mt-3 text-2xl font-semibold text-white">Lighting</h2>
+        </div>
+        {model.unsavedChanges && (
+          <span className="state-pill state-pill-stale"><span className="status-dot" /> Unsaved changes</span>
+        )}
+      </div>
+
+      {!connected && (
+        <p className="mt-4 text-sm text-[#d7aaa3]">
+          {device.configurable
+            ? "This device is not available for configuration right now."
+            : device.configurableReason ?? "No configuration interface was matched for this device."}
+        </p>
+      )}
+
+      {connected && model.status === "loading" && (
+        <p className="mt-4 text-sm text-[#8e9991]" role="status">Reading the current lighting from the device...</p>
+      )}
+
+      {connected && model.status === "unknown" && (
+        <div className="mt-4 rounded-xl border border-[#7b6c49]/50 bg-[#2a2620]/60 px-3 py-2.5 text-sm text-[#f0dcb2]" role="status">
+          <p className="font-semibold">The current lighting is unknown.</p>
+          <p className="mt-1">{model.reason ?? "The device did not confirm its state."} Editing is unavailable until it responds.</p>
+          <button className="button-secondary button-small mt-3" onClick={() => void lighting.refresh()}>Try again</button>
+        </div>
+      )}
+
+      {connected && model.status === "ready" && current && (
+        <div className="mt-6 space-y-5">
+          {showsZoneSelector(descriptor) && (
+            <div>
+              <label className="field-label" htmlFor="lighting-zone">Zone</label>
+              <select
+                id="lighting-zone"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-[#e4ebe5]"
+                value={selectedZone}
+                onChange={(event) => lighting.selectZone(Number(event.target.value))}
+              >
+                {descriptor.zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <label className="field-label" htmlFor="lighting-colour">Colour</label>
+            <div className="mt-2 flex items-center gap-3">
+              <input
+                id="lighting-colour"
+                type="color"
+                className="h-10 w-16 cursor-pointer rounded-lg border border-white/10 bg-black/20"
+                value={toHex(current.color)}
+                disabled={!editable}
+                onChange={(event) => change({ color: fromHex(event.target.value) })}
+              />
+              <span className="text-sm text-[#9aa69d]">{toHex(current.color)}</span>
+            </div>
+          </div>
+
+          <div>
+            <label className="field-label" htmlFor="lighting-brightness">
+              Brightness <span className="text-[#9aa69d]">({current.brightness})</span>
+            </label>
+            <input
+              id="lighting-brightness"
+              type="range"
+              className="mt-2 w-full"
+              min={descriptor.brightness.min}
+              max={descriptor.brightness.max}
+              step={1}
+              value={current.brightness}
+              disabled={!editable}
+              onChange={(event) => change({ brightness: Number(event.target.value) })}
+            />
+          </div>
+
+          <div>
+            <label className="field-label" htmlFor="lighting-effect">Effect</label>
+            <select
+              id="lighting-effect"
+              className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-[#e4ebe5]"
+              value={current.mode}
+              disabled={!editable}
+              onChange={(event) => change({ mode: Number(event.target.value) })}
+            >
+              {descriptor.effects.map((effect) => <option key={effect.id} value={effect.id}>{effect.name}</option>)}
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 border-t border-white/8 pt-5">
+            <button className="button-primary button-small" disabled={!editable} onClick={() => void lighting.save()}>
+              Save to device
+            </button>
+            <p className="text-xs text-[#8e9991]">
+              Changes apply immediately. Unsaved changes are lost when the device is unplugged.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {model.notice && <p className="mt-4 text-sm text-[#f0bab2]" role="status">{model.notice}</p>}
     </section>
   );
 }

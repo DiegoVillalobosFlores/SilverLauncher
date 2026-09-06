@@ -1,4 +1,13 @@
 import { useEffect, useState } from "react";
+import type { LightingDescriptor } from "./lighting-model";
+
+export interface UiDeviceEndpoint {
+  role: "identify" | "control";
+  path: string;
+  usagePage?: number;
+  usage?: number;
+  reportId?: number;
+}
 
 export interface UiDevice {
   id: string;
@@ -9,7 +18,10 @@ export interface UiDevice {
   capabilities: string[];
   connection: "connected" | "disconnected";
   connectionPath: "usb" | "dongle" | null;
-  path?: string;
+  endpoints: Partial<Record<"identify" | "control", UiDeviceEndpoint>>;
+  configurable: boolean;
+  configurableReason?: string;
+  lighting?: LightingDescriptor;
   serialNumber?: string;
   vendorId: number;
   productId: number;

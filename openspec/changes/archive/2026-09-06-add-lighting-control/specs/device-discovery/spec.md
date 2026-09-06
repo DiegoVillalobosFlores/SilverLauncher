@@ -1,8 +1,4 @@
-## Purpose
-
-Defines how Silver Launcher finds the peripherals attached to the machine, decides which of them it supports, tracks their coming and going while the app is open, and reports each model's real capabilities to the rest of the application.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Supported-device registry
 
@@ -64,41 +60,6 @@ The system SHALL enumerate the machine's USB HID devices and match each against 
 
 - **WHEN** two devices matching the same registry entry are attached at once
 - **THEN** each is reported as a separate connected device with its own stable identifier
-
-### Requirement: Live presence tracking
-
-The system SHALL keep device presence current for as long as the application is running, detecting attachment and removal without requiring the user to refresh or restart.
-
-#### Scenario: Device is plugged in while the app is open
-
-- **WHEN** a supported device is attached after the application has started
-- **THEN** the device is reported as connected within a few seconds
-- **AND** the interface reflects the new device without a page reload
-
-#### Scenario: Device is unplugged while the app is open
-
-- **WHEN** a connected device is removed
-- **THEN** the device is reported as disconnected
-- **AND** the removal is treated as an ordinary state, not an error
-
-#### Scenario: Device is reconnected
-
-- **WHEN** a device that was removed is attached again
-- **THEN** it is reported as connected and is recognized as the same known device rather than as an additional one
-
-### Requirement: Known devices persist across sessions
-
-The system SHALL remember supported devices it has previously seen on this machine, so a device the user owns remains visible while unplugged.
-
-#### Scenario: Previously seen device is not attached at startup
-
-- **WHEN** the application starts and a previously seen supported device is not attached
-- **THEN** the device is reported as known and disconnected
-
-#### Scenario: First run with no devices attached
-
-- **WHEN** the application starts on a machine with no supported device attached and no remembered devices
-- **THEN** the reported device set is empty and this is not an error
 
 ### Requirement: Permission and access failures are reported, not hidden
 

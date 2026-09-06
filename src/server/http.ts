@@ -13,11 +13,14 @@ import {
   type RegistryEntry,
 } from "./registry";
 import { DiscoveryService, type DeviceState, type DiscoverySnapshot } from "./discovery";
+import type { LightingCommitResult, LightingFailure, LightingReadResult, LightingService, LightingWriteResult } from "./lighting";
+import type { LightingZoneState } from "./codecs";
 
 export interface HttpDependencies {
   discovery: DiscoveryService;
   profiles: ProfileStore;
   registry?: readonly RegistryEntry[];
+  lighting?: LightingService;
 }
 
 export interface MirrorTargetReport {
@@ -70,6 +73,10 @@ export function createApiHandler(dependencies: HttpDependencies): (request: Requ
       }
       if (request.method === "POST" && url.pathname === "/api/profiles/mirror") {
         return await mirrorProfiles(request, dependencies);
+      }
+      const lightingRoute = matchLightingRoute(url.pathname);
+      if (lightingRoute) {
+        return await handleLighting(request, lightingRoute, dependencies);
       }
       return json({ error: "Not found" }, 404);
     } catch (error) {
@@ -201,6 +208,127 @@ async function mirrorProfiles(request: Request, dependencies: HttpDependencies):
     }, "replace");
   }
   return json(report);
+}
+
+
+interface LightingRoute {
+  deviceId: string;
+  action: "state" | "commit";
+}
+
+function matchLightingRoute(pathname: string): LightingRoute | undefined {
+  const prefix = "/api/devices/";
+  if (!pathname.startsWith(prefix)) return undefined;
+  const rest = pathname.slice(prefix.length);
+  const commit = rest.endsWith("/lighting/commit");
+  const state = rest.endsWith("/lighting");
+  if (!commit && !state) return undefined;
+  const suffix = commit ? "/lighting/commit" : "/lighting";
+  const deviceId = decodePathPart(rest.slice(0, -suffix.length));
+  if (!deviceId) return undefined;
+  return { deviceId, action: commit ? "commit" : "state" };
+}
+
+/**
+ * Failures are mapped to distinct statuses so the interface can say which one
+ * happened rather than reporting one generic error.
+ */
+function lightingStatus(failure: LightingFailure): number {
+  switch (failure.code) {
+    case "unsupported":
+    case "not-configurable":
+      return 501;
+    case "access-denied":
+      return 403;
+    case "disconnected":
+      return 409;
+    case "unreachable":
+    case "rejected":
+    case "timeout":
+      return 503;
+    case "not-applied":
+      return 502;
+  }
+}
+
+async function handleLighting(
+  request: Request,
+  route: LightingRoute,
+  dependencies: HttpDependencies,
+): Promise<Response> {
+  const lighting = dependencies.lighting;
+  if (!lighting) return json({ error: "Lighting control is not available" }, 501);
+  const device = dependencies.discovery.getSnapshot().devices.find((candidate) => candidate.id === route.deviceId);
+  if (!device) return json({ error: "Device not found" }, 404);
+
+  if (route.action === "commit") {
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    return lightingCommitResponse(await lighting.commit(route.deviceId));
+  }
+  if (request.method === "GET") {
+    return lightingReadResponse(await lighting.read(route.deviceId));
+  }
+  if (request.method === "PUT") {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "The lighting request must be valid JSON" }, 400);
+    }
+    const parsed = parseLightingRequest(body);
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    return lightingWriteResponse(await lighting.apply(route.deviceId, parsed.zoneId, parsed.state));
+  }
+  return json({ error: "Method not allowed" }, 405);
+}
+
+function lightingReadResponse(result: LightingReadResult): Response {
+  if (result.status === "ok") {
+    return json({ status: "ok", descriptor: result.descriptor, zones: result.zones });
+  }
+  // The device's state is not reported as a value here, and no default stands
+  // in for one: the response says unknown and says why.
+  return json(
+    { status: "unknown", code: result.code, reason: result.reason, descriptor: result.descriptor },
+    lightingStatus(result),
+  );
+}
+
+function lightingWriteResponse(result: LightingWriteResult): Response {
+  if (result.status === "ok") return json({ status: "ok", zone: result.zone });
+  return json({ status: "failed", code: result.code, reason: result.reason }, lightingStatus(result));
+}
+
+function lightingCommitResponse(result: LightingCommitResult): Response {
+  if (result.status === "ok") return json({ status: "ok" });
+  return json({ status: "failed", code: result.code, reason: result.reason }, lightingStatus(result));
+}
+
+function parseLightingRequest(
+  body: unknown,
+): { zoneId: number; state: LightingZoneState } | { error: string } {
+  if (!isRecord(body)) return { error: "The lighting request must be an object" };
+  const zoneId = body.zoneId;
+  if (!Number.isInteger(zoneId)) return { error: "zoneId is required" };
+  const color = body.color;
+  if (!isRecord(color)) return { error: "color is required" };
+  const channels = ["r", "g", "b"] as const;
+  for (const channel of channels) {
+    const value = color[channel];
+    if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 255) {
+      return { error: `color.${channel} must be a whole number between 0 and 255` };
+    }
+  }
+  if (!Number.isInteger(body.brightness)) return { error: "brightness is required" };
+  if (!Number.isInteger(body.mode)) return { error: "mode is required" };
+  return {
+    zoneId: zoneId as number,
+    state: {
+      mode: body.mode as number,
+      brightness: body.brightness as number,
+      color: { r: color.r as number, g: color.g as number, b: color.b as number },
+    },
+  };
 }
 
 export function createSseResponse(request: Request, discovery: DiscoveryService): Response {

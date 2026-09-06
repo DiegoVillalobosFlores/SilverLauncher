@@ -1,5 +1,5 @@
 import type { HidPort } from "./hid";
-import { matchDevices, capabilitiesFor, type ConnectionPath, type DeviceKind, type Feature, type LogicalDeviceCandidate, type RegistryEntry } from "./registry";
+import { matchDevices, capabilitiesFor, candidatePath, type ConnectionPath, type DeviceEndpoints, type DeviceKind, type Feature, type LightingDescriptor, type LogicalDeviceCandidate, type RegistryEntry } from "./registry";
 import { KnownDeviceStore, type KnownDeviceRecord } from "./persistence";
 import { ProfileStore } from "./profiles";
 import { DEVICE_REGISTRY } from "./registry";
@@ -17,13 +17,23 @@ export interface DeviceState {
   capabilities: Feature[];
   connection: DeviceConnectionState;
   connectionPath: ConnectionPath | null;
-  path?: string;
+  /** The interfaces this unit was matched on, addressed by role. */
+  endpoints: DeviceEndpoints;
+  /** False when no control endpoint resolved, so no command can be sent. */
+  configurable: boolean;
+  configurableReason?: string;
+  lighting?: LightingDescriptor;
   serialNumber?: string;
   vendorId: number;
   productId: number;
   access: DeviceAccessState;
   accessReason?: string;
   profileName: string | null;
+}
+
+/** What discovery needs to know about configuration sessions holding a device open. */
+export interface OpenSessionRegistry {
+  hasOpenSession(path: string): boolean;
 }
 
 export interface DiscoverySnapshot {
@@ -49,6 +59,7 @@ export interface DiscoveryServiceOptions {
   registry?: readonly RegistryEntry[];
   intervalMs?: number;
   now?: () => Date;
+  sessions?: OpenSessionRegistry;
 }
 
 export class DiscoveryService {
@@ -58,6 +69,7 @@ export class DiscoveryService {
   readonly registry: readonly RegistryEntry[];
   readonly intervalMs: number;
   private readonly now: () => Date;
+  private sessions: OpenSessionRegistry | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private refreshInFlight: Promise<DiscoverySnapshot> | undefined;
   private started = false;
@@ -72,6 +84,12 @@ export class DiscoveryService {
     this.registry = options.registry ?? DEVICE_REGISTRY;
     this.intervalMs = options.intervalMs ?? 1_000;
     this.now = options.now ?? (() => new Date());
+    this.sessions = options.sessions;
+  }
+
+  /** Sessions are created after discovery, so the registry is attached later. */
+  useSessions(sessions: OpenSessionRegistry): void {
+    this.sessions = sessions;
   }
 
   getSnapshot(): DiscoverySnapshot {
@@ -159,7 +177,7 @@ export class DiscoveryService {
     const ordered = [...candidates].sort((left, right) => {
       const modelOrder = left.entry.id.localeCompare(right.entry.id);
       if (modelOrder !== 0) return modelOrder;
-      return (left.path ?? "").localeCompare(right.path ?? "");
+      return (candidatePath(left) ?? "").localeCompare(candidatePath(right) ?? "");
     });
     const devices: DeviceState[] = [];
     const recordsToSave: KnownDeviceRecord[] = [];
@@ -199,7 +217,12 @@ export class DiscoveryService {
         capabilities: capabilitiesFor(candidate.entry),
         connection: "connected",
         connectionPath: candidate.match.connection,
-        path: candidate.path,
+        endpoints: cloneEndpoints(candidate.endpoints),
+        configurable: Boolean(candidate.endpoints.control),
+        configurableReason: candidate.endpoints.control
+          ? undefined
+          : "No configuration interface was matched for this device",
+        lighting: candidate.entry.lighting,
         serialNumber: candidate.serialNumber,
         vendorId: candidate.vendorId,
         productId: candidate.productId,
@@ -214,10 +237,22 @@ export class DiscoveryService {
     return devices;
   }
 
+  /**
+   * Access is judged on the endpoint the device is configured through, so that
+   * "granted" means configurable rather than merely visible. A device with no
+   * control endpoint is judged on the endpoint that identifies it, and is
+   * reported as not configurable separately.
+   */
   private async checkAccess(candidate: LogicalDeviceCandidate): Promise<{ granted: true } | { granted: false; reason: string }> {
-    if (!candidate.path) return { granted: false, reason: "The HID backend did not report an access path" };
+    const target = candidate.endpoints.control ?? candidate.endpoints.identify;
+    if (!target) return { granted: false, reason: "The HID backend did not report an access path" };
+    // A held-open configuration session already proves the endpoint is
+    // accessible. Probing it again would collide with that session and, on
+    // platforms with exclusive HID access, flip the device to denied once a
+    // second for no user-visible cause.
+    if (this.sessions?.hasOpenSession(target.path)) return { granted: true };
     try {
-      const handle = await this.hidPort.open(candidate.path);
+      const handle = await this.hidPort.open(target.path);
       await handle.close();
       return { granted: true };
     } catch (error) {
@@ -270,6 +305,9 @@ function disconnectedState(record: KnownDeviceRecord): DeviceState {
     capabilities: [...record.capabilities],
     connection: "disconnected",
     connectionPath: record.connectionPath,
+    endpoints: {},
+    configurable: false,
+    configurableReason: "The device is not connected",
     serialNumber: record.serialNumber,
     vendorId: record.vendorId,
     productId: record.productId,
@@ -299,8 +337,15 @@ function diffTransitions(previous: readonly DeviceState[], next: readonly Device
   return transitions;
 }
 
+function cloneEndpoints(endpoints: DeviceEndpoints): DeviceEndpoints {
+  const clone: DeviceEndpoints = {};
+  if (endpoints.identify) clone.identify = { ...endpoints.identify };
+  if (endpoints.control) clone.control = { ...endpoints.control };
+  return clone;
+}
+
 function cloneDevice(device: DeviceState): DeviceState {
-  return { ...device, capabilities: [...device.capabilities] };
+  return { ...device, capabilities: [...device.capabilities], endpoints: cloneEndpoints(device.endpoints) };
 }
 
 function cloneSnapshot(snapshot: DiscoverySnapshot): DiscoverySnapshot {

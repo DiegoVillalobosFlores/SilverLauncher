@@ -56,6 +56,13 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
+The rules above match every `hidraw` interface a supported device exposes,
+which matters because a device is configured over its vendor interface rather
+than over the mouse or keyboard interface the system already uses. Access is
+judged on that vendor interface, so a device reported as accessible is one the
+app can actually configure — a rule narrowed to the input interface alone would
+leave the device visible but unconfigurable.
+
 The app keeps a detected device visible as access-denied when the rule is
 missing, instead of hiding it.
 

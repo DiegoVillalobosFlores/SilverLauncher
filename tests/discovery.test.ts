@@ -8,6 +8,12 @@ import { KnownDeviceStore } from "../src/server/persistence";
 import { ProfileStore } from "../src/server/profiles";
 
 const roots: string[] = [];
+const harpe = (overrides: Record<string, unknown> = {}) => ({
+  vendorId: 0x0b05,
+  productId: 0x1ad0,
+  serialNumber: "harpe-1",
+  ...overrides,
+});
 const m6 = (path = "/dev/m6", serialNumber?: string) => ({
   vendorId: 0x3434,
   productId: 0xd028,
@@ -95,5 +101,53 @@ describe("device discovery", () => {
     const second = new DiscoveryService({ hidPort: secondPort, knownDevices: secondKnown, profileStore: secondProfiles, intervalMs: 60_000 });
     await second.start();
     expect(second.getSnapshot().devices).toMatchObject([{ id, connection: "disconnected", profileName: "Default" }]);
+  });
+});
+
+describe("device state carries endpoints and feature descriptors", () => {
+  const harpeInterfaces = [
+    harpe({ path: "/dev/hidraw5", usagePage: 0x01, usage: 0x02 }),
+    harpe({ path: "/dev/hidraw6", usagePage: 0xff02, usage: 0x01 }),
+  ];
+
+  test("exposes the lighting descriptor and both endpoints on the snapshot", async () => {
+    const { service } = await setup([harpeInterfaces]);
+    const device = service.getSnapshot().devices[0]!;
+    expect(device.endpoints.identify?.path).toBe("/dev/hidraw5");
+    expect(device.endpoints.control?.path).toBe("/dev/hidraw6");
+    expect(device.configurable).toBe(true);
+    expect(device.lighting?.zones).toEqual([{ id: 0, name: "Logo" }]);
+  });
+
+  test("reports a device without a control endpoint as not configurable", async () => {
+    const { service } = await setup([[m6("/dev/m6", "unit-1")]]);
+    const device = service.getSnapshot().devices[0]!;
+    expect(device.configurable).toBe(false);
+    expect(device.configurableReason).toBeTruthy();
+    expect(device.lighting).toBeUndefined();
+  });
+
+  test("judges access on the control endpoint, not the identify endpoint", async () => {
+    const { service } = await setup([harpeInterfaces], { openFailures: { "/dev/hidraw6": "Permission denied" } });
+    const device = service.getSnapshot().devices[0]!;
+    expect(device.access).toBe("denied");
+    expect(device.accessReason).toContain("Permission denied");
+  });
+
+  test("re-probes access so a permission fix during a run is noticed", async () => {
+    const { port, service } = await setup([harpeInterfaces], { openFailures: { "/dev/hidraw6": "Permission denied" } });
+    expect(service.getSnapshot().devices[0]?.access).toBe("denied");
+    port.allow("/dev/hidraw6");
+    const refreshed = await service.refresh();
+    expect(refreshed.devices[0]?.access).toBe("granted");
+  });
+
+  test("does not re-open an endpoint a configuration session holds", async () => {
+    const { port, service } = await setup([harpeInterfaces]);
+    port.deny("/dev/hidraw6", "Permission denied");
+    service.useSessions({ hasOpenSession: (path) => path === "/dev/hidraw6" });
+    const refreshed = await service.refresh();
+    expect(refreshed.devices[0]?.access).toBe("granted");
+    expect(port.openedPaths.filter((path) => path === "/dev/hidraw6")).toHaveLength(1);
   });
 });

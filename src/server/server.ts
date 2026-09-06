@@ -4,6 +4,7 @@ import { DiscoveryService } from "./discovery";
 import { createApiHandler, type HttpDependencies } from "./http";
 import { KnownDeviceStore, applicationConfigDirectory } from "./persistence";
 import { ProfileStore } from "./profiles";
+import { LightingService } from "./lighting";
 
 export interface ServerOptions {
   port?: number;
@@ -23,6 +24,7 @@ export interface SilverApplication {
   discovery: DiscoveryService;
   profiles: ProfileStore;
   knownDevices: KnownDeviceStore;
+  lighting: LightingService;
   close(): Promise<void>;
 }
 
@@ -40,6 +42,8 @@ export async function createHttpServer(
     "/api/devices": { GET: apiRoute },
     "/api/devices/stream": { GET: apiRoute },
     "/api/devices/:id/profile/export": { GET: apiRoute },
+    "/api/devices/:id/lighting": { GET: apiRoute, PUT: apiRoute },
+    "/api/devices/:id/lighting/commit": { POST: apiRoute },
     "/api/profiles": { GET: apiRoute },
     "/api/profiles/export/:id": { GET: apiRoute },
     "/api/profiles/import": { POST: apiRoute },
@@ -61,21 +65,25 @@ export async function createApplication(options: ApplicationOptions = {}): Promi
   const knownDevices = options.knownDeviceStore ?? new KnownDeviceStore(rootDir);
   const profiles = options.profileStore ?? new ProfileStore({ rootDir });
   await profiles.load();
+  const hidPort = options.hidPort ?? new NodeHidPort();
   const discovery = options.discovery ?? new DiscoveryService({
-    hidPort: options.hidPort ?? new NodeHidPort(),
+    hidPort,
     knownDevices,
     profileStore: profiles,
   });
   await discovery.start();
-  const server = await createHttpServer({ discovery, profiles }, options);
+  const lighting = new LightingService({ hidPort: discovery.hidPort, discovery });
+  const server = await createHttpServer({ discovery, profiles, lighting }, options);
   console.log(`Silver Launcher serving at ${server.url}`);
   return {
     server,
     discovery,
     profiles,
     knownDevices,
+    lighting,
     async close() {
       await server.stop(true);
+      await lighting.closeAll();
       await discovery.stop();
     },
   };
